@@ -96,7 +96,10 @@ contract gswTAO is ERC20, AccessControl {
 
         UnwrapRequest storage unwrapRequest = unwrapRequests[msg.sender];
 
-        require(unwrapRequest.reqStatus == Status.UNKNOWN, "Previous request pending");
+        if(unwrapRequest.reqStatus == Status.COMPLETE)
+            unwrapRequest.reqStatus = Status.UNKNOWN;
+        else
+            require(unwrapRequest.reqStatus == Status.UNKNOWN, "Previous request pending");
  
         uint256 rate = burnRate();
         uint256 bridgeAmount = amount * rate;
