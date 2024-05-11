@@ -2,18 +2,16 @@
 
 pragma solidity ^0.8.0;
 
-import "@openzeppelin/contracts/access/AccessControl.sol";
-import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
+import "./base/erc20.sol";
 import "./interfaces/IRelayRegistry.sol";
 import "./interfaces/IwTAO.sol";
-import { SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "./lib//OwnableImplement.sol";
+import {SafeERC20, IERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
+contract gswTAO is OwnableImplement, ERC20 {
+    using SafeERC20 for IERC20;
 
-// TODO: Add the fucking ACCESS CONTROL vars
-contract gswTAO is ERC20, AccessControl {
-    using SafeERC20 for ERC20;
-
-    address public owner;
+    bool public initComplete;
 
     enum Status {
         UNKNOWN,
@@ -21,154 +19,264 @@ contract gswTAO is ERC20, AccessControl {
         READY,
         COMPLETE
     }
-    
+
     struct UnwrapRequest {
         Status reqStatus;
         uint256 amount;
         uint256 timestamp;
+        uint256 nonce;
     }
 
-    mapping(address => UnwrapRequest) public unwrapRequests;
+    bool public relaysLimited;
 
-    uint256 public yieldAvailable;
+    uint256 public stakeFee;
 
     address public wTAO;
     address public relayRegistry;
+    address public feeColector;
 
-    uint256 public totalDeposits;
     uint256 public latestTAOBalance;
+    uint256 public unwrapNonce;
+    uint256 public processedNonce;
 
-    // validator cold_key/administrative wallet on bittensor
-    string public taoReceiver;
+    uint256 public constant DIVISOR = 1e32;
 
     uint256 private constant _NOT_ENTERED = 1;
     uint256 private constant _ENTERED = 2;
     uint256 _status = _NOT_ENTERED;
 
+    // bittensor cold_key address
+    string public taoReceiver;
+
+    mapping(address => UnwrapRequest) public unwrapRequests;
+    mapping(address => bool) public relayerWhitelist;
+
     modifier entryGuard() {
-        require(_status != _ENTERED, "ReentrancyGuard: reentrant call");
+        require(_status != _ENTERED, "!reentrancy");
         _status = _ENTERED;
         _;
         _status = _NOT_ENTERED;
     }
 
-    modifier onlyOwner() {
-        require(msg.sender == owner, "Only owner can call this function");
-        _;
-    }
-
     modifier onlyRelayers() {
-        bool isRelayer = IRelayRegistry(relayRegistry).isRelayer(msg.sender);
-        require(isRelayer, "Only relayers");
+        _checkRelayer();
         _;
     }
 
+    event StakeWTAO(address user, uint256 amount);
+    event UnwrapRequested(address user, uint256 amount, uint256 nonce);
+    event Claim(address user, uint256 amount, uint256 nonce);
     event Rebase(uint256 newBalance);
 
-    constructor() ERC20("gswTAO", "gswTAO") {
-        owner = msg.sender;
+    constructor() ERC20("Gradient Staked TAO", "gswTAO", 9) {
+        _owner = msg.sender;
+        relaysLimited = true;
+    }
+
+    function initializerator(
+        address _feeColector,
+        address _wTAO,
+        address _relayRegistry,
+        string memory _taoReceiver
+    ) public {
+        require(msg.sender == _owner, "!owner");
+
+        require(!initComplete, "!!initialized");
+        initComplete = true;
+
+        feeColector = _feeColector;
+        taoReceiver = _taoReceiver;
+        wTAO = _wTAO;
+        relayRegistry = _relayRegistry;
     }
 
     function wrap(uint256 amount) external {
-        require(amount > 0, "Amount must be greater than 0");
+        require(amount > 0, "!greater_than_zero");
+        require(amount > minStakeAmt(), "!min_stake_amt");
 
-        uint256 bal = ERC20(wTAO).balanceOf(address(this));
+        uint256 bal = IERC20(wTAO).balanceOf(address(this));
         _transferTokens(wTAO, msg.sender, address(this), amount);
-        uint256 deposit = ERC20(wTAO).balanceOf(address(this)) - bal;
+        uint256 deposit = IERC20(wTAO).balanceOf(address(this)) - bal;
 
         // this is prolly not needed
-        // ERC20(wTAO).approve(wTAO, deposit);
+        // IERC20(wTAO).approve(wTAO, deposit);
 
-        require(IwTAO(wTAO).bridgeBack(deposit, taoReceiver), "TAO bridging failed");
+        require(
+            IwTAO(wTAO).bridgeBack(deposit, taoReceiver),
+            "bridging_failed"
+        );
+
+        uint256 bitFee = IwTAO(wTAO).BITTENSOR_FEE();
+
+        deposit -= (bitFee + stakeFee);
 
         uint256 rate = mintRate();
-        uint256 mintAmount = deposit * rate;
+        uint256 mintAmount = (deposit * rate) / DIVISOR;
 
         _mint(msg.sender, mintAmount);
-        totalDeposits += deposit;
+        latestTAOBalance += deposit;
+
+        emit StakeWTAO(msg.sender, mintAmount);
     }
 
-    // ONLY ONE UNWRAP REQUEST PER ADDRESS
-    // in order to save gas, reduce complexity/attack surface
+    // ONLY ONE UNWRAP REQUEST PER ADDRESS AT A TIME
+    // This is done in order to save on gas and reduce complexity/attack surface
 
     function unwrap(uint256 amount) external {
-        require(amount > 0, "Amount must be greater than 0");
+        require(amount > 0, "!greater_than_zero");
 
         UnwrapRequest storage unwrapRequest = unwrapRequests[msg.sender];
 
-        if(unwrapRequest.reqStatus == Status.COMPLETE)
+        if (unwrapRequest.reqStatus == Status.COMPLETE)
             unwrapRequest.reqStatus = Status.UNKNOWN;
         else
-            require(unwrapRequest.reqStatus == Status.UNKNOWN, "Previous request pending");
- 
+            require(
+                unwrapRequest.reqStatus == Status.UNKNOWN,
+                "request_pending"
+            );
+
         uint256 rate = burnRate();
-        uint256 bridgeAmount = amount * rate;
+        uint256 bridgeAmount = (amount * rate) / DIVISOR;
 
         _burn(msg.sender, amount);
-        totalDeposits -= amount;
+        latestTAOBalance -= bridgeAmount;
 
-        unwrapRequests[msg.sender] = (UnwrapRequest({
-            reqStatus: Status.INIT,
-            amount: bridgeAmount,
-            timestamp: block.timestamp
-        }));
+        // adding this to handle precision limitations
+        if (latestTAOBalance == 1) latestTAOBalance = 0;
+
+        unwrapRequests[msg.sender] = (
+            UnwrapRequest({
+                reqStatus: Status.INIT,
+                amount: bridgeAmount,
+                timestamp: block.timestamp,
+                nonce: unwrapNonce
+            })
+        );
+
+        emit UnwrapRequested(msg.sender, bridgeAmount, unwrapNonce++);
     }
 
     function claim() external {
         UnwrapRequest storage unwrapRequest = unwrapRequests[msg.sender];
-        require(unwrapRequest.reqStatus == Status.READY, "No pending claim");
+        require(unwrapRequest.reqStatus == Status.READY, "!claim");
 
-        uint256 pendingOut = unwrapRequest.amount;
+        uint256 bitFee = IwTAO(wTAO).BITTENSOR_FEE();
+        uint256 pendingOut = unwrapRequest.amount - bitFee;
 
         unwrapRequest.amount = 0;
         unwrapRequest.reqStatus = Status.COMPLETE;
 
+        require(
+            IERC20(wTAO).balanceOf(address(this)) >= pendingOut,
+            "!balance"
+        );
+
         _transferTokens(wTAO, address(this), msg.sender, pendingOut);
+        _transferTokens(wTAO, address(this), feeColector, bitFee);
+
+        emit Claim(msg.sender, pendingOut, unwrapRequest.nonce);
     }
 
+    // View functions
 
-// View functions
-
-    // TODO: revise on finish
     function mintRate() public view returns (uint256) {
-        return totalDeposits == 0 || totalSupply() < totalDeposits ? 0 
-            : totalSupply() * 1e32 / totalDeposits / 1e32;
+        return
+            totalSupply == 0
+                ? 1 * DIVISOR
+                : (totalSupply * DIVISOR) / latestTAOBalance;
     }
-    // TODO: revise on finish
+
     function burnRate() public view returns (uint256) {
-        return totalDeposits == 0 || totalSupply() < totalDeposits ? 0 
-            : totalDeposits * 1e32 / totalSupply() / 1e32;
+        return
+            totalSupply == 0
+                ? 1 * DIVISOR
+                : (latestTAOBalance * DIVISOR) / totalSupply;
     }
 
-    function meanYield() external view returns (uint256){
-        uint256 surplus = latestTAOBalance -  totalDeposits;
-        return surplus / totalDeposits;
+    function minStakeAmt() public view returns (uint256) {
+        return IwTAO(wTAO).BITTENSOR_FEE() * 4;
     }
 
-    function getCurrentRate() external view returns (uint256) {
-        return mintRate();
+    // OWNERS ONLY DOT COM / RELAYERS ONLY DOT COM
+
+    function setRelayerWhitelist(address relayer, bool status) external onlyOwner {
+        relayerWhitelist[relayer] = status;
     }
 
-// RELAYERS ONLY DOT COM
-         
-    function updateBalances(uint256 newBalance) external onlyRelayers() {
-        latestTAOBalance = newBalance;
-        emit Rebase(newBalance);
+    function setRegistry(address _registry) external onlyOwner {
+        relayRegistry = _registry;
     }
 
-    function fulfillRequest(address user) external onlyRelayers() {
+    function setRelayLimited(bool _set) external onlyOwner {
+        relaysLimited = _set;
+    }
+
+    function setStakeFee(uint256 _stakeFee) external onlyOwner {
+        stakeFee = _stakeFee;
+    }
+
+    function setTaoReceiver(string memory _taoReceiver) external onlyOwner {
+        taoReceiver = _taoReceiver;
+    }
+
+    function setFeeCollector(address _feeCollector) external onlyOwner {
+        feeColector = _feeCollector;
+    }
+
+    function setBalance(uint256 _latestTAOBalance) external onlyRelayers {
+        require(_latestTAOBalance >= totalSupply, "invalid_balance");
+        require(totalSupply > 0, "invalid_total_supply");
+
+        latestTAOBalance = _latestTAOBalance;
+        emit Rebase(_latestTAOBalance);
+    }
+
+    function fulfillRequest(address user) external onlyRelayers {
         UnwrapRequest storage unwrapRequest = unwrapRequests[user];
-        require(unwrapRequest.reqStatus == Status.INIT, "No pending request");
+        require(unwrapRequest.reqStatus == Status.INIT, "!pending");
+        require(unwrapRequest.nonce == processedNonce, "invalid_nonce");
+        processedNonce++;
+
+        require(
+            IERC20(wTAO).balanceOf(address(this)) >=
+                unwrapRequest.amount - IwTAO(wTAO).BITTENSOR_FEE(),
+            "insufficient_balance"
+        );
 
         unwrapRequest.reqStatus = Status.READY;
     }
 
-
-// internal functions
-    function _transferTokens(address token, address from, address to, uint256 amount) internal entryGuard {
-        if(from == address(this))
-            ERC20(token).safeTransfer(to, amount);
-        else
-            ERC20(token).safeTransferFrom(from, to, amount);
+    function rescueTokens(
+        address recipient,
+        address token,
+        uint256 amount
+    ) external onlyOwner {
+        IERC20(token).safeTransferFrom(address(this), recipient, amount);
     }
+
+    function rescueNative(uint256 amount, address payable recipient) external onlyOwner {
+        recipient.transfer(amount);
+    }
+
+    // internal functions
+
+    function _checkRelayer() internal view {
+        if(relaysLimited) {
+            require(relayerWhitelist[msg.sender], "!whitelisted");
+        } else {
+            bool isRelayer = IRelayRegistry(relayRegistry).isRelayer(msg.sender);
+            require(isRelayer, "!relayer");
+        }
+    }
+
+    function _transferTokens(
+        address token,
+        address from,
+        address to,
+        uint256 amount
+    ) internal entryGuard {
+        if (from == address(this)) IERC20(token).safeTransfer(to, amount);
+        else IERC20(token).safeTransferFrom(from, to, amount);
+    }
+
 }

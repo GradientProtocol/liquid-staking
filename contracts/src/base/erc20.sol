@@ -4,15 +4,13 @@ import "../interfaces/IwTAO.sol";
 
 pragma solidity ^0.8.0;
 
-contract wTAO {
+contract ERC20 {
+
+
     string public symbol;
     string public name;
     uint256 public decimals;
     uint256 public totalSupply;
-
-    // this was a real fee from the live contract
-    // it's a 0.125% fee and has the same number of decimals as wTAO (9)
-    uint256 public BITTENSOR_FEE = 125000145;
 
     mapping(address => uint256) balances;
     mapping(address => mapping(address => uint256)) allowed;
@@ -23,24 +21,14 @@ contract wTAO {
     constructor(
         string memory _name,
         string memory _symbol,
-        uint256 _decimals,
-        uint256 _totalSupply
+        uint256 _decimals
     )
         
     {
         name = _name;
         symbol = _symbol;
         decimals = _decimals;
-        totalSupply = _totalSupply;
-        balances[msg.sender] = _totalSupply;
-        emit Transfer(address(0), msg.sender, _totalSupply);
     }
-
-    function bridgeBack(uint256 _amount, string memory) external returns(bool) {
-        _burn(msg.sender, _amount);
-        return true;
-    }
-
     
     function balanceOf(address _owner) public view returns (uint256) {
         return balances[_owner];
@@ -65,17 +53,26 @@ contract wTAO {
         return true;
     }
 
-    
     function _transfer(address _from, address _to, uint256 _value) internal {
         require(balances[_from] >= _value, "Insufficient balance");
-        balances[_from] = balances[_from] - (_value);
-        balances[_to] = balances[_to] + (_value);
+        unchecked {
+            balances[_from] = balances[_from] - (_value);
+            balances[_to] = balances[_to] + (_value);
+        }
         emit Transfer(_from, _to, _value);
     }
 
     function _burn(address _from, uint256 _value) internal {
         require(balances[_from] >= _value, "Insufficient balance");
         balances[_from] -= _value;
+        totalSupply -= _value;
+        emit Transfer(_from, address(0), _value);
+    }
+
+    function _mint(address account, uint256 value) internal {
+        balances[account] += value;
+        totalSupply += value;
+        emit Transfer(address(0), account, value);
     }
 
     
@@ -95,7 +92,7 @@ contract wTAO {
         returns (bool)
     {
         require(allowed[_from][msg.sender] >= _value, "Insufficient allowance");
-        allowed[_from][msg.sender] = allowed[_from][msg.sender] - (_value);
+        allowed[_from][msg.sender] -= _value;
         _transfer(_from, _to, _value);
         return true;
     }

@@ -2,24 +2,17 @@
 
 pragma solidity ^0.8.0;
 
-import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
-
-contract RelayRegistr {
+contract RelayRegistry is Ownable {
     using SafeERC20 for IERC20;
     using Address for address;
 
-    address public owner;
     address public entryToken;
-
-    bytes32 public constant AUX_ADMIN = keccak256("AUX_ADMIN");
-    uint256 constant DIVISOR = 10_000;
+    uint256 public entryThreshold;
 
     mapping(address => uint256) public relayerBalances;
-
-    uint256 public entryThreshold;
 
     // entryguard vars
     uint256 private constant _NOT_ENTERED = 1;
@@ -34,14 +27,12 @@ contract RelayRegistr {
         _status = _NOT_ENTERED;
     }
 
-    modifier onlyOwner() {
-        require(msg.sender == owner, "Only owner can call this function");
-        _;
-    }
+    event RelayerEnrolled(address indexed relayer, uint256 amount);
+    event RelayerHalted(address indexed relayer, uint256 amount);
 
-    constructor(address _entryToken) {
-        owner = msg.sender;
+    constructor(address _entryToken, uint256 _entryThreshold) {
         entryToken = _entryToken;
+        entryThreshold = _entryThreshold;
     }
 
     function enrollRelayer(uint256 amount) public {
@@ -53,6 +44,8 @@ contract RelayRegistr {
         uint256 deposit = IERC20(entryToken).balanceOf(address(this)) - bal0;
 
         relayerBalances[msg.sender] = deposit;
+        
+        emit RelayerEnrolled(msg.sender, deposit);
     }
 
     function haltRelayer() public {
@@ -61,10 +54,20 @@ contract RelayRegistr {
         uint256 amt = relayerBalances[msg.sender];
         relayerBalances[msg.sender] = 0;
         _transfer(address(this), msg.sender, amt);
+
+        emit RelayerHalted(msg.sender, amt);
+    }
+
+    function setEntryThreshold(uint256 _entryThreshold) public onlyOwner {
+        entryThreshold = _entryThreshold;
+    }
+
+    function setEntryToken(address _entryToken) public onlyOwner {
+        entryToken = _entryToken;
     }
 
     function isRelayer(address relay) external view returns (bool) {
-        return relayerBalances[relay] == entryThreshold;
+        return relayerBalances[relay] >= entryThreshold;
     }
 
     function _transfer(address from, address to, uint256 amount) internal entryGuard {
