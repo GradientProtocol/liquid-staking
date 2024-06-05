@@ -2,7 +2,7 @@
 
 import "../interfaces/IwTAO.sol";
 
-pragma solidity ^0.8.0;
+pragma solidity ^0.8.26;
 
 abstract contract ERC20 {
 
