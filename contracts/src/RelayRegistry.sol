@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-pragma solidity ^0.8.26;
+pragma solidity ^0.8.0;
 
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
@@ -43,13 +43,15 @@ contract RelayRegistry is Ownable {
         _transfer(msg.sender, address(this), amount);
         uint256 deposit = IERC20(entryToken).balanceOf(address(this)) - bal0;
 
+        require(deposit >= entryThreshold, "Insufficient deposit");
+
         relayerBalances[msg.sender] = deposit;
         
         emit RelayerEnrolled(msg.sender, deposit);
     }
 
     function haltRelayer() public {
-        require(relayerBalances[msg.sender] >= entryThreshold, "Relay not registered");
+        require(relayerBalances[msg.sender] > 0, "Relay not registered");
 
         uint256 amt = relayerBalances[msg.sender];
         relayerBalances[msg.sender] = 0;
