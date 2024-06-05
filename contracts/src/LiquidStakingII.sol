@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-pragma solidity ^0.8.0;
+pragma solidity ^0.8.26;
 
 import "./base/erc20.sol";
 import "./interfaces/IRelayRegistry.sol";
@@ -33,7 +33,7 @@ contract gswTAO is OwnableImplement, ERC20 {
 
     address public wTAO;
     address public relayRegistry;
-    address public feeColector;
+    address public feeCollector;
 
     uint256 public latestTAOBalance;
     uint256 public unwrapNonce;
@@ -68,13 +68,10 @@ contract gswTAO is OwnableImplement, ERC20 {
     event Claim(address user, uint256 amount, uint256 nonce);
     event Rebase(uint256 newBalance);
 
-    constructor() ERC20("Gradient Staked TAO", "gswTAO", 9) {
-        _owner = msg.sender;
-        relaysLimited = true;
-    }
+    constructor() {}
 
     function initializerator(
-        address _feeColector,
+        address _feeCollector,
         address _wTAO,
         address _relayRegistry,
         string memory _taoReceiver
@@ -82,9 +79,13 @@ contract gswTAO is OwnableImplement, ERC20 {
         require(msg.sender == _owner, "!owner");
 
         require(!initComplete, "!!initialized");
+        
         initComplete = true;
 
-        feeColector = _feeColector;
+        ERC20.initialize("Gradient Staked TAO", "gswTAO", 9);
+
+        relaysLimited = true;
+        feeCollector = _feeCollector;
         taoReceiver = _taoReceiver;
         wTAO = _wTAO;
         relayRegistry = _relayRegistry;
@@ -153,7 +154,8 @@ contract gswTAO is OwnableImplement, ERC20 {
             })
         );
 
-        emit UnwrapRequested(msg.sender, bridgeAmount, unwrapNonce++);
+        emit UnwrapRequested(msg.sender, bridgeAmount, unwrapNonce);
+        unwrapNonce++;
     }
 
     function claim() external {
@@ -172,7 +174,7 @@ contract gswTAO is OwnableImplement, ERC20 {
         );
 
         _transferTokens(wTAO, address(this), msg.sender, pendingOut);
-        _transferTokens(wTAO, address(this), feeColector, bitFee);
+        _transferTokens(wTAO, address(this), feeCollector, bitFee);
 
         emit Claim(msg.sender, pendingOut, unwrapRequest.nonce);
     }
@@ -181,14 +183,14 @@ contract gswTAO is OwnableImplement, ERC20 {
 
     function mintRate() public view returns (uint256) {
         return
-            totalSupply == 0
+            totalSupply == 0 || latestTAOBalance == 0
                 ? 1 * DIVISOR
                 : (totalSupply * DIVISOR) / latestTAOBalance;
     }
 
     function burnRate() public view returns (uint256) {
         return
-            totalSupply == 0
+            totalSupply == 0 || latestTAOBalance == 0
                 ? 1 * DIVISOR
                 : (latestTAOBalance * DIVISOR) / totalSupply;
     }
@@ -204,6 +206,7 @@ contract gswTAO is OwnableImplement, ERC20 {
     }
 
     function setRegistry(address _registry) external onlyOwner {
+        require(_registry != address(0), "invalid_address");
         relayRegistry = _registry;
     }
 
@@ -212,15 +215,23 @@ contract gswTAO is OwnableImplement, ERC20 {
     }
 
     function setStakeFee(uint256 _stakeFee) external onlyOwner {
+        require(_stakeFee < 1e9, "invalid_stake_fee");
         stakeFee = _stakeFee;
     }
 
     function setTaoReceiver(string memory _taoReceiver) external onlyOwner {
+        require(bytes(_taoReceiver).length > 0, "invalid_tao_receiver");
         taoReceiver = _taoReceiver;
     }
 
+    function setTaoAddress(address _wTAO) external onlyOwner {
+        require(_wTAO != address(0), "invalid_address");
+        wTAO = _wTAO;
+    }
+
     function setFeeCollector(address _feeCollector) external onlyOwner {
-        feeColector = _feeCollector;
+        require(_feeCollector != address(0), "invalid_address");
+        feeCollector = _feeCollector;
     }
 
     function setBalance(uint256 _latestTAOBalance) external onlyRelayers {
@@ -246,12 +257,31 @@ contract gswTAO is OwnableImplement, ERC20 {
         unwrapRequest.reqStatus = Status.READY;
     }
 
+    function fulfillBatchRequest(address[] calldata users) external onlyRelayers {
+        uint256 runningTotal;
+        for (uint256 i = 0; i < users.length; i++) {
+            address user = users[i];
+
+            UnwrapRequest storage unwrapRequest = unwrapRequests[user];
+            if(unwrapRequest.reqStatus != Status.INIT) continue;
+            if(unwrapRequest.nonce != processedNonce) continue;
+            processedNonce++;
+
+            runningTotal += unwrapRequest.amount - IwTAO(wTAO).BITTENSOR_FEE();
+            uint256 bal = IERC20(wTAO).balanceOf(address(this));
+
+            require(bal >= runningTotal, "insufficient_balance");
+
+            unwrapRequest.reqStatus = Status.READY;
+        }
+    }
+
     function rescueTokens(
         address recipient,
         address token,
         uint256 amount
     ) external onlyOwner {
-        IERC20(token).safeTransferFrom(address(this), recipient, amount);
+        IERC20(token).safeTransfer(recipient, amount);
     }
 
     function rescueNative(uint256 amount, address payable recipient) external onlyOwner {

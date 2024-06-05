@@ -2,8 +2,6 @@
 pragma solidity >=0.8.0 <0.9.0;
 
 import "./lib//OwnableImplement.sol";
-import "hardhat/console.sol";
-// import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
  * @title Proxy
@@ -17,9 +15,7 @@ contract Proxy is OwnableImplement {
     /// @notice Emitted when a new implementation is set.
     event Upgraded(address indexed from, address indexed to);
 
-    constructor() {
-        _owner = msg.sender;
-    }
+    constructor() {}
 
     function implementation() public view returns (address) {
         return _implementation;
@@ -27,9 +23,6 @@ contract Proxy is OwnableImplement {
 
     /// @notice Set the new implementation.
     function setImplementation(address newImplementation) public onlyOwner {
-        console.log("setImplementation called");
-        console.log("current addres: %s", address(this));
-        console.log("setImplementation called: %s", msg.sender);
         require(
             newImplementation != address(0),
             "Proxy: upgrading to the zero address"
