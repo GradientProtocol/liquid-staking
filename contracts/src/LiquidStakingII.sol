@@ -51,6 +51,8 @@ contract gswTAO is OwnableImplement, ERC20 {
     mapping(address => UnwrapRequest) public unwrapRequests;
     mapping(address => bool) public relayerWhitelist;
 
+    uint256 public decDiff;
+
     modifier entryGuard() {
         require(_status != _ENTERED, "!reentrancy");
         _status = _ENTERED;
@@ -82,13 +84,15 @@ contract gswTAO is OwnableImplement, ERC20 {
         
         initComplete = true;
 
-        ERC20.initialize("Gradient Staked TAO", "gswTAO", 9);
+        ERC20.initialize("Gradient Staked TAO", "gswTAO", 18);
 
         relaysLimited = true;
         feeCollector = _feeCollector;
         taoReceiver = _taoReceiver;
         wTAO = _wTAO;
         relayRegistry = _relayRegistry;
+
+        decDiff = this.decimals() - IwTAO(wTAO).decimals();
     }
 
     function wrap(uint256 amount) external {
@@ -98,9 +102,6 @@ contract gswTAO is OwnableImplement, ERC20 {
         uint256 bal = IERC20(wTAO).balanceOf(address(this));
         _transferTokens(wTAO, msg.sender, address(this), amount);
         uint256 deposit = IERC20(wTAO).balanceOf(address(this)) - bal;
-
-        // this is prolly not needed
-        // IERC20(wTAO).approve(wTAO, deposit);
 
         require(
             IwTAO(wTAO).bridgeBack(deposit, taoReceiver),
@@ -112,7 +113,7 @@ contract gswTAO is OwnableImplement, ERC20 {
         deposit -= (bitFee + stakeFee);
 
         uint256 rate = mintRate();
-        uint256 mintAmount = (deposit * rate) / DIVISOR;
+        uint256 mintAmount = ((deposit * 10**decDiff) * rate) / DIVISOR;
 
         _mint(msg.sender, mintAmount);
         latestTAOBalance += deposit;
@@ -137,7 +138,7 @@ contract gswTAO is OwnableImplement, ERC20 {
             );
 
         uint256 rate = burnRate();
-        uint256 bridgeAmount = (amount * rate) / DIVISOR;
+        uint256 bridgeAmount = (amount * rate) / DIVISOR / 10**decDiff;
 
         _burn(msg.sender, amount);
         latestTAOBalance -= bridgeAmount;
@@ -181,18 +182,22 @@ contract gswTAO is OwnableImplement, ERC20 {
 
     // View functions
 
-    function mintRate() public view returns (uint256) {
-        return
+    function mintRate() public view returns (uint256 rate) {
+        rate =
             totalSupply == 0 || latestTAOBalance == 0
                 ? 1 * DIVISOR
-                : (totalSupply * DIVISOR) / latestTAOBalance;
+                : (totalSupply * DIVISOR) / (latestTAOBalance * 10**decDiff);
+
+        return rate;
     }
 
-    function burnRate() public view returns (uint256) {
-        return
+    function burnRate() public view returns (uint256 rate) {
+        rate =
             totalSupply == 0 || latestTAOBalance == 0
                 ? 1 * DIVISOR
-                : (latestTAOBalance * DIVISOR) / totalSupply;
+                : ((latestTAOBalance * 10**decDiff) * DIVISOR) / totalSupply;
+
+        return rate;
     }
 
     function minStakeAmt() public view returns (uint256) {
@@ -235,7 +240,7 @@ contract gswTAO is OwnableImplement, ERC20 {
     }
 
     function setBalance(uint256 _latestTAOBalance) external onlyRelayers {
-        require(_latestTAOBalance >= totalSupply, "invalid_balance");
+        require(_latestTAOBalance >= totalSupply / 10**decDiff, "invalid_balance");
         require(totalSupply > 0, "invalid_total_supply");
 
         latestTAOBalance = _latestTAOBalance;
@@ -274,6 +279,10 @@ contract gswTAO is OwnableImplement, ERC20 {
 
             unwrapRequest.reqStatus = Status.READY;
         }
+    }
+
+    function setDecDiff() external onlyOwner {
+        decDiff = this.decimals() - IwTAO(wTAO).decimals();
     }
 
     function rescueTokens(
