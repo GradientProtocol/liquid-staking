@@ -23,6 +23,7 @@ contract gswTAO is OwnableImplement, ERC20 {
     struct UnwrapRequest {
         Status reqStatus;
         uint256 amount;
+        uint256 finalAmount;
         uint256 timestamp;
         uint256 nonce;
     }
@@ -52,6 +53,11 @@ contract gswTAO is OwnableImplement, ERC20 {
     mapping(address => bool) public relayerWhitelist;
 
     uint256 public decDiff;
+    
+    uint256 public ethGasFee;
+    uint256 public bttGasFee;
+    uint256 public bttFeePercent;
+    uint256 public bttDivisor;
 
     modifier entryGuard() {
         require(_status != _ENTERED, "!reentrancy");
@@ -72,19 +78,18 @@ contract gswTAO is OwnableImplement, ERC20 {
 
     constructor() {}
 
-    function initializerator(
+    function initialize(
         address _feeCollector,
         address _wTAO,
         address _relayRegistry,
         string memory _taoReceiver
     ) public {
         require(msg.sender == _owner, "!owner");
-
-        require(!initComplete, "!!initialized");
+        require(decDiff == 0 || !initComplete, "!!initialized");
         
         initComplete = true;
 
-        ERC20.initialize("Gradient Staked TAO", "gswTAO", 18);
+        ERC20.initializeERC("Gradient Staked TAO", "gswTAO", 18);
 
         relaysLimited = true;
         feeCollector = _feeCollector;
@@ -93,6 +98,16 @@ contract gswTAO is OwnableImplement, ERC20 {
         relayRegistry = _relayRegistry;
 
         decDiff = this.decimals() - IwTAO(wTAO).decimals();
+    }
+
+    function initializeERC(
+        string memory _name,
+        string memory _symbol,
+        uint8 _decimals
+    ) public override onlyOwner {
+        require(decDiff == 0 || !initComplete, "!!initialized");
+        ERC20.initializeERC(_name, _symbol, _decimals);
+
     }
 
     function wrap(uint256 amount) external {
@@ -126,6 +141,7 @@ contract gswTAO is OwnableImplement, ERC20 {
 
     function unwrap(uint256 amount) external {
         require(amount > 0, "!greater_than_zero");
+        require(amount > minStakeAmt(), "!min_stake_amt");
 
         UnwrapRequest storage unwrapRequest = unwrapRequests[msg.sender];
 
@@ -150,6 +166,7 @@ contract gswTAO is OwnableImplement, ERC20 {
             UnwrapRequest({
                 reqStatus: Status.INIT,
                 amount: bridgeAmount,
+                finalAmount: 0,
                 timestamp: block.timestamp,
                 nonce: unwrapNonce
             })
@@ -163,10 +180,10 @@ contract gswTAO is OwnableImplement, ERC20 {
         UnwrapRequest storage unwrapRequest = unwrapRequests[msg.sender];
         require(unwrapRequest.reqStatus == Status.READY, "!claim");
 
-        uint256 bitFee = IwTAO(wTAO).BITTENSOR_FEE();
-        uint256 pendingOut = unwrapRequest.amount - bitFee;
+        uint256 pendingOut = unwrapRequest.finalAmount;
 
         unwrapRequest.amount = 0;
+        unwrapRequest.finalAmount = 0;
         unwrapRequest.reqStatus = Status.COMPLETE;
 
         require(
@@ -175,7 +192,6 @@ contract gswTAO is OwnableImplement, ERC20 {
         );
 
         _transferTokens(wTAO, address(this), msg.sender, pendingOut);
-        _transferTokens(wTAO, address(this), feeCollector, bitFee);
 
         emit Claim(msg.sender, pendingOut, unwrapRequest.nonce);
     }
@@ -202,6 +218,24 @@ contract gswTAO is OwnableImplement, ERC20 {
 
     function minStakeAmt() public view returns (uint256) {
         return IwTAO(wTAO).BITTENSOR_FEE() * 4;
+    }
+
+    function bridgeToEthFee(uint256 amount) public view returns (uint256 actualFee) {
+        uint256 percentFee = (amount * bttFeePercent) / bttDivisor;
+        actualFee = percentFee > bttGasFee ? percentFee : bttGasFee;
+        actualFee += ethGasFee;
+    }
+
+    // defaults based off taobridge.xyz values:
+    // eth gas fee: 2000 => 0.002 eth
+    // btt gas fee: 500000 => 0.005 tao
+    // % fee: 5 => 0.5% fee
+    // calc divisor: 1000 => allows calc values down to 0.1%
+    function setBttValues(uint256 _ethGasFee, uint256 _bttGasFee, uint256 _bttFeePercent, uint256 _bttDivisor) external onlyOwner {
+        ethGasFee = _ethGasFee;
+        bttGasFee = _bttGasFee;
+        bttFeePercent = _bttFeePercent;
+        bttDivisor = _bttDivisor;
     }
 
     // OWNERS ONLY DOT COM / RELAYERS ONLY DOT COM
@@ -253,9 +287,10 @@ contract gswTAO is OwnableImplement, ERC20 {
         require(unwrapRequest.nonce == processedNonce, "invalid_nonce");
         processedNonce++;
 
+        unwrapRequest.finalAmount = (unwrapRequest.amount - bridgeToEthFee(unwrapRequest.amount));
         require(
             IERC20(wTAO).balanceOf(address(this)) >=
-                unwrapRequest.amount - IwTAO(wTAO).BITTENSOR_FEE(),
+                unwrapRequest.finalAmount, // / 10**decDiff - ethGasFee,
             "insufficient_balance"
         );
 
@@ -272,13 +307,14 @@ contract gswTAO is OwnableImplement, ERC20 {
             if(unwrapRequest.nonce != processedNonce) continue;
             processedNonce++;
 
-            runningTotal += unwrapRequest.amount - IwTAO(wTAO).BITTENSOR_FEE();
-            uint256 bal = IERC20(wTAO).balanceOf(address(this));
-
-            require(bal >= runningTotal, "insufficient_balance");
+            runningTotal += unwrapRequest.amount - bridgeToEthFee(unwrapRequest.amount);
+            unwrapRequest.finalAmount = (unwrapRequest.amount - bridgeToEthFee(unwrapRequest.amount));
 
             unwrapRequest.reqStatus = Status.READY;
         }
+
+        uint256 bal = IERC20(wTAO).balanceOf(address(this));
+        require(bal >= runningTotal, "insufficient_balance");
     }
 
     function setDecDiff() external onlyOwner {

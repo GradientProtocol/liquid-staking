@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 
 import "../interfaces/IwTAO.sol";
+import "../lib/OwnableImplement.sol";
+
 
 pragma solidity ^0.8.26;
 
@@ -17,11 +19,11 @@ abstract contract ERC20 {
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
 
-    function initialize(
+    function initializeERC(
         string memory _name,
         string memory _symbol,
         uint8 _decimals
-    ) public 
+    ) public virtual
         
     {
         name = _name;
